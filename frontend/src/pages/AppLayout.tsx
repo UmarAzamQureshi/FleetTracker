@@ -20,7 +20,8 @@ export default function AppLayout() {
               </svg>
             </button>
             <div className="hidden md:flex items-center space-x-1">
-              <NavLink to="/" end className={linkClass}>Dashboard</NavLink>
+              <NavLink to="/" end className={linkClass}>Home</NavLink>
+              <NavLink to="/dashboard" className={linkClass}>Dashboard</NavLink>
               <NavLink to="/vehicles" className={linkClass}>Vehicles</NavLink>
               <NavLink to="/drivers" className={linkClass}>Drivers</NavLink>
               <NavLink to="/routes" className={linkClass}>Routes</NavLink>
@@ -29,7 +30,8 @@ export default function AppLayout() {
           </div>
           {open && (
             <div className="md:hidden pb-3 space-y-1">
-              <NavLink to="/" end className={linkClass} onClick={() => setOpen(false)}>Dashboard</NavLink>
+              <NavLink to="/" end className={linkClass} onClick={() => setOpen(false)}>Home</NavLink>
+              <NavLink to="/dashboard" className={linkClass} onClick={() => setOpen(false)}>Dashboard</NavLink>
               <NavLink to="/vehicles" className={linkClass} onClick={() => setOpen(false)}>Vehicles</NavLink>
               <NavLink to="/drivers" className={linkClass} onClick={() => setOpen(false)}>Drivers</NavLink>
               <NavLink to="/routes" className={linkClass} onClick={() => setOpen(false)}>Routes</NavLink>
