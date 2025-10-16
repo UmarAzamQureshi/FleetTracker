@@ -1,0 +1,21 @@
+@import url('leaflet/dist/leaflet.css');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+
+
+:root { color-scheme: dark; }
+
+html, body, #app { height: 100%; }
+
+body { margin: 0; }
+
+
+.dashboard-map{
+    min-height: 93vh;
+}
+
+.report-map{
+    min-height: 78vh;   
+}
