@@ -1,0 +1,129 @@
+<!doctype html>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Phone Tracker</title>
+<body style="font-family:system-ui;margin:16px;line-height:1.35">
+  <h2>Phone Tracker</h2>
+  <div id="status" style="padding:8px;border-radius:8px;background:#222;color:#eee;margin-bottom:8px">Status: idle</div>
+
+  <label>API Key
+    <input id="key" style="width:100%" placeholder="paste API key from /devices/register">
+  </label>
+  <div style="margin:10px 0">
+    <button id="start">Start</button>
+    <button id="stop" disabled>Stop</button>
+    <button id="test">Test POST</button>
+  </div>
+
+  <pre id="log" style="white-space:pre-wrap;background:#111;color:#eee;padding:12px;border-radius:8px;height:40vh;overflow:auto"></pre>
+
+<script>
+const URL = location.origin + "/phone/ingest";          // absolute URL
+const log = (...a)=>{ const e=document.getElementById('log'); e.textContent=[new Date().toLocaleTimeString(), ...a, "\n", e.textContent].join(' ') }
+const setStatus = (t)=>{ document.getElementById('status').textContent = "Status: " + t; }
+
+let watchId=null, last=null, wakeLock=null;
+const minTimeMs=5000, minDistM=5;                        // faster + more sensitive for testing
+
+function toKmh(mps){ return mps==null? null : mps*3.6; }
+function haversine(a,b,c,d){
+  const R=6371000,toR=x=>x*Math.PI/180, dLa=toR(c-a),dLo=toR(d-b);
+  const h=Math.sin(dLa/2)**2+Math.cos(toR(a))*Math.cos(toR(c))*Math.sin(dLo/2)**2;
+  return 2*R*Math.atan2(Math.sqrt(h),Math.sqrt(1-h));
+}
+
+async function send(key,pos){
+  const body={ ts:new Date().toISOString(), lat:pos.coords.latitude, lon:pos.coords.longitude,
+    alt:pos.coords.altitude??null, speed_kmh:toKmh(pos.coords.speed),
+    heading:pos.coords.heading??null, hdop:pos.coords.accuracy??null };
+  const res = await fetch(URL,{ method:"POST", headers:{ "Content-Type":"application/json","X-API-Key":key },
+    body:JSON.stringify(body), keepalive:true });
+  if(!res.ok){ const txt=await res.text(); throw new Error(`HTTP ${res.status}: ${txt}`); }
+  log("sent", JSON.stringify(body));
+}
+
+async function checkPermission(){
+  if (!('geolocation' in navigator)) { setStatus("Geolocation API not available"); log("No navigator.geolocation"); return "unsupported"; }
+  if (navigator.permissions && navigator.permissions.query) {
+    try {
+      const p = await navigator.permissions.query({name:'geolocation'});
+      log("permission:", p.state);
+      return p.state; // "granted" | "prompt" | "denied"
+    } catch { /* Safari may not support */ }
+  }
+  return "unknown";
+}
+
+async function start(){
+  const key=document.getElementById('key').value.trim();
+  if(!key){ alert("Paste API key from /devices/register"); return; }
+  localStorage.setItem('tracker_api_key',key);
+  document.getElementById('start').disabled=true;
+  document.getElementById('stop').disabled=false;
+
+  if('wakeLock' in navigator){ try{ wakeLock=await navigator.wakeLock.request('screen'); }catch{} }
+
+  const perm = await checkPermission();
+  setStatus(`starting (permission: ${perm})`);
+  // 1) Immediate single fix to kick things off
+  navigator.geolocation.getCurrentPosition(async p=>{
+    log("first fix", JSON.stringify({lat:p.coords.latitude, lon:p.coords.longitude, acc:p.coords.accuracy}));
+    try { await send(key,p); } catch(e){ log("send failed", e.message); }
+  }, err=>{
+    log("geo error (getCurrentPosition):", err.message);
+    if (err.message.toLowerCase().includes("secure") || err.message.toLowerCase().includes("insecure origins")) {
+      log("TIP: Use HTTPS (or localhost). On iOS Safari/modern Chrome, geolocation is blocked on http://192.168.x.x");
+      setStatus("blocked (needs HTTPS)");
+    }
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:0 });
+
+  // 2) Continuous watch
+  watchId=navigator.geolocation.watchPosition(async p=>{
+    setStatus("tracking…");
+    const now=Date.now();
+    const should=!last || (now-last.t)>=minTimeMs ||
+      haversine(last.lat,last.lon,p.coords.latitude,p.coords.longitude)>=minDistM;
+    if(should){
+      last={t:now,lat:p.coords.latitude,lon:p.coords.longitude};
+      try{ await send(key,p);}catch(e){ log("send failed", e.message); }
+    } else {
+      log("skipped (rate/distance limit)");
+    }
+  }, err=>{
+    log("geo error (watchPosition):", err.message);
+    if (err.message.toLowerCase().includes("secure") || err.message.toLowerCase().includes("insecure origins")) {
+      log("TIP: Use HTTPS (or localhost). On iOS Safari/modern Chrome, geolocation is blocked on http://192.168.x.x");
+      setStatus("blocked (needs HTTPS)");
+    } else {
+      setStatus("error: " + err.message);
+    }
+  }, { enableHighAccuracy:true, timeout:10000, maximumAge:2000 });
+
+  log("tracking started");
+}
+
+function stop(){
+  if(watchId!=null) navigator.geolocation.clearWatch(watchId);
+  watchId=null; last=null;
+  document.getElementById('start').disabled=false; document.getElementById('stop').disabled=true;
+  if(wakeLock) try{ wakeLock.release(); }catch{}
+  setStatus("stopped");
+  log("tracking stopped");
+}
+
+async function testPost(){
+  const key=document.getElementById('key').value.trim();
+  if(!key){ return alert("Paste API key first"); }
+  try{
+    const body={ ts:new Date().toISOString(), lat:33.6844, lon:73.0479 };
+    const res = await fetch(URL,{ method:"POST", headers:{ "Content-Type":"application/json","X-API-Key":key }, body:JSON.stringify(body) });
+    log("TEST POST result", res.status);
+    if(!res.ok){ log("TEST POST error body", await res.text()); }
+  }catch(e){ log("TEST POST failed:", e.message); }
+}
+
+document.getElementById('start').onclick=start;
+document.getElementById('stop').onclick=stop;
+document.getElementById('test').onclick=testPost;
+document.getElementById('key').value = localStorage.getItem('tracker_api_key')||"";
+</script>
+</body>

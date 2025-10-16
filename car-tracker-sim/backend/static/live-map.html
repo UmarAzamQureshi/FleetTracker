@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fleet Live Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  html,body,#map{height:100%;margin:0}
+  .toolbar{position:absolute;z-index:9999;top:8px;left:8px;background:#111;color:#eee;padding:8px 10px;border-radius:10px;box-shadow:0 2px 10px rgba(0,0,0,.3);font-family:system-ui}
+  .toolbar select, .toolbar button{margin:4px 0;width:100%}
+  .legend{position:absolute;z-index:9999;bottom:8px;left:8px;background:#111;color:#eee;padding:8px;border-radius:8px;max-width:280px;font-family:system-ui}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px}
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="toolbar">
+  <div><strong>Devices</strong></div>
+  <select id="deviceFilter">
+    <option value="">All devices</option>
+  </select>
+  <button id="showRouteBtn">Show route (last 500)</button>
+  <button id="clearRouteBtn">Clear route</button>
+  <label><input type="checkbox" id="followChk"> Follow selected</label>
+</div>
+
+<div class="legend" id="legend"><strong>Last updates</strong><div id="legendBody"></div></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+// Basic map
+const map = L.map('map').setView([33.6844, 73.0479], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution:'&copy; OpenStreetMap'
+}).addTo(map);
+
+// Layers & state
+const markers = new Map();  // deviceId -> {marker, lastTs}
+const colors  = new Map();  // deviceId -> color
+const routeLayer = L.layerGroup().addTo(map);
+const deviceSelect = document.getElementById('deviceFilter');
+const legendBody = document.getElementById('legendBody');
+
+function colorFor(id){
+  if(colors.has(id)) return colors.get(id);
+  // deterministic pastel-ish color
+  let h=0; for (let i=0;i<id.length;i++) h=(h*31+id.charCodeAt(i))>>>0;
+  const hue = h % 360; const col = `hsl(${hue} 90% 50%)`;
+  colors.set(id,col); return col;
+}
+
+function upsertDeviceOption(id){
+  if([...deviceSelect.options].some(o=>o.value===id)) return;
+  const opt=document.createElement('option'); opt.value=id; opt.textContent=id;
+  deviceSelect.appendChild(opt);
+}
+
+function updateLegend(){
+  const items = [...markers.entries()]
+    .sort((a,b)=> (b[1].lastTs||0)-(a[1].lastTs||0))
+    .slice(0,8);
+  legendBody.innerHTML = items.map(([id,info])=>{
+    const t = info.lastTs ? new Date(info.lastTs).toLocaleTimeString() : '—';
+    return `<div><span class="dot" style="background:${colorFor(id)}"></span>${id} · ${t}</div>`;
+  }).join('');
+}
+
+function upsertMarker(feature){
+  const p = feature.properties;
+  const [lon,lat] = feature.geometry.coordinates;
+  const id = p.device_id;
+  upsertDeviceOption(id);
+
+  const ll = [lat,lon];
+  if(!markers.has(id)){
+    const m = L.circleMarker(ll, {radius:8, color: colorFor(id)})
+      .bindPopup(()=> `<b>${id}</b><br>ts: ${p.ts}<br>speed: ${p.speed_kmh??'-'} km/h<br>heading: ${p.heading??'-'}`)
+      .addTo(map);
+    markers.set(id, { marker: m, lastTs: Date.parse(p.ts) });
+  } else {
+    const info = markers.get(id);
+    info.marker.setLatLng(ll);
+    info.marker.setStyle({color: colorFor(id)});
+    info.marker._popup && info.marker.setPopupContent(`<b>${id}</b><br>ts: ${p.ts}<br>speed: ${p.speed_kmh??'-'} km/h<br>heading: ${p.heading??'-'}`);
+    info.lastTs = Date.parse(p.ts);
+  }
+
+  // auto-fit for first points
+  if(markers.size===1) map.setView(ll, 14);
+
+  // follow?
+  const follow = document.getElementById('followChk').checked;
+  const selected = deviceSelect.value;
+  if(follow && selected && selected===id) map.panTo(ll);
+
+  updateLegend();
+}
+
+// Initial load (recent points)
+fetch('/telemetry/geojson?limit=1000')
+  .then(r=>r.json())
+  .then(fc=>{
+    if(!fc || !fc.features) return;
+    fc.features.forEach(f=> upsertMarker(f));
+  })
+  .catch(e=> console.error('init load failed', e));
+
+// WebSocket live updates
+const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const ws = new WebSocket(`${proto}//${location.host}/ws`);
+ws.onmessage = (e)=>{
+  try{
+    const msg = JSON.parse(e.data);
+    if(msg.type!=='telemetry') return;
+
+    // Build a GeoJSON-like object for reuse
+    const f = {
+      type:'Feature',
+      properties:{
+        id: msg.id,
+        device_id: msg.device_id,
+        ts: msg.ts,
+        speed_kmh: msg.speed_kmh,
+        heading: msg.heading
+      },
+      geometry:{ type:'Point', coordinates:[msg.lon, msg.lat] }
+    };
+
+    // Filter by device if one is selected
+    if (deviceSelect.value && deviceSelect.value !== msg.device_id) return;
+
+    upsertMarker(f);
+  }catch(err){ console.error(err); }
+};
+
+// Show route for selected device
+document.getElementById('showRouteBtn').onclick = async ()=>{
+  routeLayer.clearLayers();
+  const id = deviceSelect.value;
+  if(!id){ alert('Select a device first'); return; }
+  const r = await fetch(`/route/${encodeURIComponent(id)}?limit=500`);
+  if(!r.ok){ alert('route fetch failed'); return; }
+  const fc = await r.json();
+  const latlngs = fc.features.map(f=>[f.geometry.coordinates[1], f.geometry.coordinates[0]]);
+  if(latlngs.length===0){ alert('No points yet'); return; }
+  L.polyline(latlngs, {color: colorFor(id), weight:4, opacity:0.8}).addTo(routeLayer);
+  map.fitBounds(L.latLngBounds(latlngs), {padding:[20,20]});
+};
+
+document.getElementById('clearRouteBtn').onclick = ()=> routeLayer.clearLayers();
+</script>
+</body>
+</html>

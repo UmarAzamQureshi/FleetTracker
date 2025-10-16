@@ -1,0 +1,133 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Car Tracker — Islamabad Simulator</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <style>
+    html,body,#map { height: 100%; margin: 0; padding: 0; }
+    .info {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 1000;
+      background: white;
+      padding: 8px;
+      border-radius: 6px;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.15);
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="info" id="info">Status: connecting...</div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const deviceId = "SIM_ISB_1"; // must match simulator
+    const baseUrl = ""; // same origin, served by FastAPI
+    const routeUrl = `${baseUrl}/route/${deviceId}?limit=1000`;
+    const wsUrl =
+      (location.protocol === "https:" ? "wss://" : "ws://") +
+      location.host +
+      "/ws";
+
+    // init map centered on Islamabad
+    const map = L.map("map").setView([33.6844, 73.0479], 13);
+
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 19,
+      attribution: "© OpenStreetMap",
+    }).addTo(map);
+
+    // polyline for route
+    const routeCoords = [];
+    const polyline = L.polyline(routeCoords, { color: "blue" }).addTo(map);
+
+    // custom car icon
+    const carIcon = L.icon({
+      iconUrl: "car.png", // your uploaded PNG
+      iconSize: [60, 30], // adjust size to your liking
+      iconAnchor: [30, 15], // center the car
+      popupAnchor: [0, -15],
+    });
+
+    // marker for current position
+    const marker = L.marker([0, 0], { icon: carIcon }).addTo(map);
+    marker.bindPopup("Waiting for position...");
+
+    const info = document.getElementById("info");
+
+    async function fetchInitialRoute() {
+      try {
+        const r = await fetch(routeUrl);
+        const geo = await r.json();
+        const pts = geo.features.map((f) => [
+          f.geometry.coordinates[1],
+          f.geometry.coordinates[0],
+        ]);
+        if (pts.length) {
+          polyline.setLatLngs(pts);
+          map.fitBounds(polyline.getBounds(), { padding: [50, 50] });
+          // set marker to last point
+          const lp = pts[pts.length - 1];
+          marker.setLatLng(lp);
+          marker.bindPopup(
+            `Last known<br>${lp[0].toFixed(5)}, ${lp[1].toFixed(5)}`
+          );
+        }
+        info.innerText = "Initial route loaded (" + pts.length + " points)";
+      } catch (e) {
+        info.innerText = "Failed to load initial route";
+        console.error(e);
+      }
+    }
+
+    fetchInitialRoute();
+
+    // WebSocket for live updates
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => {
+      info.innerText = "WebSocket connected — waiting for telemetry...";
+      ws.send("hello from client");
+    };
+    ws.onmessage = (ev) => {
+      try {
+        const data = JSON.parse(ev.data);
+        if (data.type === "telemetry" && data.device_id === deviceId) {
+          const lat = data.lat;
+          const lon = data.lon;
+          const pt = [lat, lon];
+          // append to polyline
+          const existing = polyline.getLatLngs();
+          existing.push(pt);
+          polyline.setLatLngs(existing);
+          marker.setLatLng(pt);
+          marker.bindPopup(
+            `Time: ${new Date(data.ts).toLocaleString()}<br>
+             Speed: ${data.speed_kmh || "—"} km/h`
+          ).openPopup();
+          // keep marker visible
+          map.panTo(pt, { animate: true, duration: 0.5 });
+          info.innerText = `Live: ${lat.toFixed(5)}, ${lon.toFixed(
+            5
+          )} — speed ${data.speed_kmh || "—"} km/h`;
+        }
+      } catch (e) {
+        console.error("ws msg error", e);
+      }
+    };
+    ws.onclose = () => {
+      info.innerText = "WebSocket closed";
+    };
+    ws.onerror = (e) => {
+      console.error("WS error", e);
+      info.innerText = "WebSocket error";
+    };
+  </script>
+</body>
+</html>
