@@ -122,3 +122,12 @@ PRs welcome! Please create feature branches and open a clear, scoped pull reques
 
 ### 📄 License
 MIT
+
+
+###Images
+<img width="1918" height="957" alt="image" src="https://github.com/user-attachments/assets/c69ba738-5a38-4372-9fd2-fcb2f38856e8" />
+
+###Mobile View
+![Screenshot_2025-10-20-19-44-21-99_f73b71075b1de7323614b647fe394240](https://github.com/user-attachments/assets/62314d5a-364b-4b00-b697-ea74e2d16eb8)
+![Screenshot_2025-10-20-19-45-36-09_f73b71075b1de7323614b647fe394240](https://github.com/user-attachments/assets/becb6330-64d7-4331-9c56-dca890011252)
+![Screenshot_2025-10-20-19-45-30-55_f73b71075b1de7323614b647fe394240](https://github.com/user-attachments/assets/71ea22dc-1cb8-4600-b7f2-ba09d721ed8a)
