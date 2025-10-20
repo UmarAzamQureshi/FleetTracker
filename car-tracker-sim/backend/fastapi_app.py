@@ -17,6 +17,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import secrets, uuid
 from datetime import timezone
 from fastapi import Depends, Header, HTTPException
+import hashlib
+import hmac
 
 
 
@@ -26,7 +28,8 @@ from fastapi import Depends, Header, HTTPException
 # ------------------------
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:umar@localhost:5432/TrackingManager"
+    #"postgresql://postgres:umar@localhost:5432/TrackingManager"
+    "postgresql://neondb_owner:npg_c3iaSs9dTHjP@ep-dawn-mode-a1sli624-pooler.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
 )
 
 app = FastAPI(title="Tracker Ingest + WebSocket")
@@ -75,6 +78,19 @@ async def startup():
     async with app.state.pool.acquire() as conn:
         # Ensure PostGIS & devices table exist
         await conn.execute("CREATE EXTENSION IF NOT EXISTS postgis;")
+        # Users table for authentication
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+              user_id       TEXT PRIMARY KEY,
+              email         TEXT UNIQUE NOT NULL,
+              password_hash TEXT,
+              google_sub    TEXT UNIQUE,
+              api_key       TEXT UNIQUE NOT NULL,
+              created_at    TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
+        )
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS devices (
               device_id  TEXT PRIMARY KEY,
@@ -115,7 +131,7 @@ class Telemetry(BaseModel):
 
 
 class DeviceRegister(BaseModel):
-    user_id: str
+    user_id: str | None = None
     device_id: str | None = None
     label: str | None = None
 
@@ -130,6 +146,43 @@ class PhoneTelemetry(BaseModel):
     sats: int | None = None
     hdop: float | None = None
 
+
+# ------------------------
+# Auth helpers and dependencies
+# ------------------------
+
+def _derive_password_hash(password: str, salt: str) -> str:
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt.encode("utf-8"), 120_000)
+    return digest.hex()
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    return f"sha256${salt}${_derive_password_hash(password, salt)}"
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    try:
+        algo, salt, stored = password_hash.split("$")
+        if algo != "sha256":
+            return False
+        check = _derive_password_hash(password, salt)
+        return hmac.compare_digest(check, stored)
+    except Exception:
+        return False
+
+
+def generate_api_key() -> str:
+    return secrets.token_urlsafe(32)
+
+
+async def require_user(x_user_api_key: str = Header(...)):
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT user_id, email FROM users WHERE api_key=$1", x_user_api_key)
+    if not row:
+        raise HTTPException(status_code=401, detail="Invalid user API key")
+    return {"user_id": row["user_id"], "email": row["email"]}
 
 # ------------------------
 # Auth dependency (API key -> device)
@@ -149,6 +202,81 @@ async def require_device(x_api_key: str = Header(...)):
 # ------------------------
 # Endpoints
 # ------------------------
+
+# -------- Auth endpoints --------
+class SignupPayload(BaseModel):
+    email: str
+    password: str | None = None
+
+
+class LoginPayload(BaseModel):
+    email: str
+    password: str
+
+
+class GooglePayload(BaseModel):
+    id_token: str | None = None
+    email: str
+    sub: str
+
+
+@app.post("/auth/signup")
+async def auth_signup(payload: SignupPayload):
+    if not payload.password:
+        raise HTTPException(status_code=400, detail="Password required for email signup")
+    pool = app.state.pool
+    user_id = f"user_{uuid.uuid4().hex[:12]}"
+    api_key = generate_api_key()
+    pwd_hash = hash_password(payload.password)
+    email_norm = (payload.email or "").strip().lower()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT user_id, api_key FROM users WHERE email=$1", email_norm)
+        if existing:
+            raise HTTPException(status_code=409, detail="User already registered")
+        await conn.execute(
+            """
+            INSERT INTO users(user_id, email, password_hash, api_key)
+            VALUES ($1,$2,$3,$4)
+            """,
+            user_id, email_norm, pwd_hash, api_key
+        )
+    return {"user_id": user_id, "api_key": api_key, "email": email_norm}
+
+
+@app.post("/auth/login")
+async def auth_login(payload: LoginPayload):
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        email_norm = (payload.email or "").strip().lower()
+        row = await conn.fetchrow("SELECT user_id, password_hash, api_key FROM users WHERE email=$1", email_norm)
+    if not row or not row["password_hash"] or not verify_password(payload.password, row["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+    return {"user_id": row["user_id"], "api_key": row["api_key"], "email": email_norm}
+
+
+@app.post("/auth/google")
+async def auth_google(payload: GooglePayload):
+    pool = app.state.pool
+    async with pool.acquire() as conn:
+        email_norm = (payload.email or "").strip().lower()
+        row = await conn.fetchrow("SELECT user_id, api_key, google_sub FROM users WHERE email=$1", email_norm)
+        if row:
+            if not row["google_sub"] and payload.sub:
+                await conn.execute("UPDATE users SET google_sub=$2 WHERE user_id=$1", row["user_id"], payload.sub)
+            return {"user_id": row["user_id"], "api_key": row["api_key"], "email": email_norm}
+        row2 = await conn.fetchrow("SELECT user_id, api_key, email FROM users WHERE google_sub=$1", payload.sub)
+        if row2:
+            return {"user_id": row2["user_id"], "api_key": row2["api_key"], "email": row2["email"]}
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        api_key = generate_api_key()
+        await conn.execute(
+            """
+            INSERT INTO users(user_id, email, google_sub, api_key)
+            VALUES ($1,$2,$3,$4)
+            """,
+            user_id, email_norm, payload.sub, api_key
+        )
+    return {"user_id": user_id, "api_key": api_key, "email": email_norm}
 
 # Ingest telemetry
 @app.post("/ingest")
@@ -229,10 +357,20 @@ async def route(device_id: str, limit: int = 500):
 
 
 @app.post("/devices/register")
-async def register_device(req: DeviceRegister):
+async def register_device(req: DeviceRegister, x_user_api_key: str | None = Header(None)):
     device_id = req.device_id or f"phone_{uuid.uuid4().hex[:12]}"
     api_key = secrets.token_urlsafe(32)
     pool = app.state.pool
+    # Resolve user_id via header if present
+    resolved_user_id = req.user_id
+    if x_user_api_key:
+        async with pool.acquire() as conn:
+            user_row = await conn.fetchrow("SELECT user_id FROM users WHERE api_key=$1", x_user_api_key)
+        if not user_row:
+            raise HTTPException(status_code=401, detail="Invalid user API key")
+        resolved_user_id = user_row["user_id"]
+    if not resolved_user_id:
+        raise HTTPException(status_code=400, detail="user_id required (or provide X-User-Api-Key header)")
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT api_key FROM devices WHERE device_id=$1", device_id)
         if row:
@@ -240,14 +378,14 @@ async def register_device(req: DeviceRegister):
             api_key = row["api_key"]
             await conn.execute(
                 "UPDATE devices SET user_id=$2, label=$3, last_seen=NOW() WHERE device_id=$1",
-                device_id, req.user_id, req.label
+                device_id, resolved_user_id, req.label
             )
         else:
             # First-time insert
             await conn.execute("""
                 INSERT INTO devices(device_id, user_id, api_key, label, last_seen)
                 VALUES ($1,$2,$3,$4,NOW());
-            """, device_id, req.user_id, api_key, req.label)
+            """, device_id, resolved_user_id, api_key, req.label)
 
     return {"device_id": device_id, "api_key": api_key}
 
